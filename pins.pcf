@@ -1,0 +1,12 @@
+# Pix Bus Pins (Physical pins 1-5)
+set_io phi2     A2  # Pin 1
+set_io pix[0]   A1  # Pin 2
+set_io pix[1]   B1  # Pin 3
+set_io pix[2]   C2  # Pin 4
+set_io pix[3]   C1  # Pin 5
+
+# Onboard LED
+set_io led      B3
+
+# Optional: Onboard 16MHz clock (if you want to use it later)
+set_io clk    B2
