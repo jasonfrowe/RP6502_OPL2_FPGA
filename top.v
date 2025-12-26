@@ -1,42 +1,94 @@
 module top (
-    input phi2,
-    input [3:0] pix,
-    output reg led
+    input phi2,             // 8MHz PIX Clock
+    input [3:0] pix,        // PIX Data
+    input clk,              // 16MHz Onboard Clock (for DAC)
+    output audio_out,
+    output reg led          
 );
 
-    // 1. Capture data on both edges of the bus clock
-    // This creates two 16-bit shift registers that stay perfectly in sync
-    reg [15:0] n_shift;
-    reg [15:0] p_shift;
+    // ------------------------------------------------------------
+    // 1. POWER-ON RESET
+    // ------------------------------------------------------------
+    reg [15:0] reset_cnt = 0;
+    wire rst = !reset_cnt[15]; // Active-high reset for ~8ms at 8MHz
+    always @(posedge phi2) if (reset_cnt[15] == 0) reset_cnt <= reset_cnt + 1;
 
+    // ------------------------------------------------------------
+    // 2. PIX DECODER (phi2 Domain)
+    // ------------------------------------------------------------
+    reg [15:0] n_shift, p_shift;
     always @(negedge phi2) n_shift <= {n_shift[11:0], pix};
     always @(posedge phi2) p_shift <= {p_shift[11:0], pix};
 
-    // 2. The "Zipper" Logic
-    // We combine them into a 32-bit word. 
-    // We will check for the Framing Bit (Bit 28) on the Falling Edge (n_shift)
     wire [31:0] frame = {
-        n_shift[15:12], p_shift[15:12], // Bits 31-24
-        n_shift[11:8],  p_shift[11:8],  // Bits 23-16
-        n_shift[7:4],   p_shift[7:4],   // Bits 15-8
-        n_shift[3:0],   p_shift[3:0]    // Bits 7-0
+        n_shift[15:12], p_shift[15:12], 
+        n_shift[11:8],  p_shift[11:8],  
+        n_shift[7:4],   p_shift[7:4],   
+        n_shift[3:0],   p_shift[3:0]    
     };
 
-    // 3. Decoding Fields
-    wire is_ria  = (frame[31:29] == 3'b000) && frame[28];
-    wire is_ff00 = (frame[15:0] == 16'hFF00 || frame[15:0] == 16'hFF01);
-    wire d_bit_0 = frame[16]; // Data Bit 0
+    wire is_ria   = (frame[31:29] == 3'b000) && frame[28];
+    wire is_opl2  = (frame[15:1] == 15'h7F80); // Addresses FF00 and FF01
+    
+    // Logic to capture and EXTEND the write pulse
+    reg [2:0] we_extend;
+    reg [7:0] opl_din;
+    reg opl_a0;
+    reg [23:0] led_timer;
 
-    // 4. Latch logic
-    // We evaluate the frame only on the Falling Edge of PHI2,
-    // specifically when we see the "next" framing bit starting.
-    // This ensures the "previous" 32 bits are fully shifted in.
     always @(negedge phi2) begin
-        if (pix[0]) begin // Framing bit detected for the START of a new message
-            if (is_ria && is_ff00) begin
-                led <= d_bit_0;
-            end
+        if (pix[0] && is_ria && is_opl2) begin
+            we_extend <= 3'b111;       // Hold write for 4 cycles
+            opl_din   <= frame[23:16];
+            opl_a0    <= frame[0];
+            led_timer <= 24'h800000;
+        end else begin
+            if (we_extend > 0) we_extend <= we_extend - 1;
+            if (led_timer > 0) led_timer <= led_timer - 1;
         end
     end
+
+    always @(phi2) led = (led_timer > 0);
+
+    // ------------------------------------------------------------
+    // 3. OPL2 CLOCK ENABLE & WRITE SIGNAL
+    // ------------------------------------------------------------
+    reg cen_toggle;
+    always @(posedge phi2) cen_toggle <= ~cen_toggle;
+
+    // Active-low Write Enable pulse
+    wire wr_n = !(we_extend > 0);
+
+    // ------------------------------------------------------------
+    // 4. JTOPL2 (YM3812) CORE
+    // ------------------------------------------------------------
+    wire signed [15:0] opl_snd;
+    
+    jtopl2 opl_inst (
+        .clk    (phi2),      
+        .cen    (cen_toggle),  
+        .rst    (rst),       // Power-on reset
+        .cs_n   (1'b0),      
+        .wr_n   (wr_n),      
+        .addr   (opl_a0),
+        .din    (opl_din),
+        .dout   (),          
+        .snd    (opl_snd),   
+        .sample (),
+        .irq_n  ()
+    );
+
+    // ------------------------------------------------------------
+    // 5. AUDIO OUTPUT (Sigma-Delta DAC)
+    // ------------------------------------------------------------
+    reg signed [15:0] dac_buffer;
+    always @(posedge clk) dac_buffer <= opl_snd;
+
+    sigma_delta_dac dac_inst (
+        .clk(clk),
+        .rst(1'b0),
+        .dac_in(dac_buffer),
+        .dac_out(audio_out)
+    );
 
 endmodule
