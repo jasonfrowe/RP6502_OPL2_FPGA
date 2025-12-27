@@ -3,10 +3,10 @@ module top (
     input [3:0] pix,        // PIX Data
     input clk,              // 16MHz Onboard Clock (for DAC)
     output audio_out,
-    output led              // Removed 'reg' here so 'assign' works
+    output led              
 );
 
-    // --- 1. POWER-ON RESET (Added back) ---
+    // --- 1. POWER-ON RESET ---
     reg [15:0] reset_cnt = 0;
     wire rst = !reset_cnt[15]; 
     always @(posedge phi2) if (reset_cnt[15] == 0) reset_cnt <= reset_cnt + 1;
@@ -36,31 +36,25 @@ module top (
     reg [7:0]  latch_reg;
     reg        fifo_flush_req = 0;
 
-    // Sniffer / Logic logic (Falling Edge)
     always @(negedge phi2) begin
         if (rst || fifo_flush_req) begin
             wr_ptr <= 0;
             fifo_flush_req <= 0;
         end else if (pix[0] && f_bit) begin
-            // A. Handle XREG Config (Device 2)
             if (device == 3'd2 && channel == 4'd0) begin
                 case (x_addr)
                     8'h00: opl_enabled <= x_val[0];
                     8'h01: opl_base_addr <= x_val[15:1];
                 endcase
             end
-            
-            // B. Handle XRAM Writes (Device 0)
             else if (device == 3'd0 && opl_enabled) begin
-                // Match Base (Index) and Base+1 (Data)
                 if (frame[15:1] == opl_base_addr[15:1]) begin
-                    if (frame[0] == 0) latch_reg <= frame[23:16]; // FF00
+                    if (frame[0] == 0) latch_reg <= frame[23:16]; 
                     else begin
-                        fifo[wr_ptr] <= {latch_reg, frame[23:16]}; // FF01
+                        fifo[wr_ptr] <= {latch_reg, frame[23:16]};
                         wr_ptr <= wr_ptr + 1;
                     end
                 end
-                // Match Base+2 (Flush Register)
                 else if (frame[15:0] == ({opl_base_addr, 1'b0} + 16'd2)) begin
                     if (frame[23:16] == 8'hAA) fifo_flush_req <= 1;
                 end
@@ -68,7 +62,7 @@ module top (
         end
     end
 
-    // --- 5. DRIVER STATE MACHINE (Rising Edge) ---
+    // --- 5. DRIVER STATE MACHINE ---
     reg [2:0] state = 0;
     reg [8:0] timer = 0;
     reg [7:0] cur_r, cur_v;
@@ -104,7 +98,23 @@ module top (
     always @(posedge clk) dac_buf <= snd;
     sigma_delta_dac dac_inst (.clk(clk), .rst(1'b0), .dac_in(dac_buf), .dac_out(audio_out));
 
-    // LED: On if OPL is enabled, flickers when processing data
-    assign led = opl_enabled ? (rd_ptr == wr_ptr ? 1'b1 : cen) : 1'b0;
+    // --- 7. PULSE-STRETCHED LED ACTIVITY ---
+    reg [19:0] led_timer;
+    reg [16:0] led_shimmer;
+
+    always @(posedge phi2) begin
+        led_shimmer <= led_shimmer + 1;
+        // If the FIFO is busy, reset the visible "stretch" timer
+        if (rd_ptr != wr_ptr) begin
+            led_timer <= 20'hFFFFF; // Stays active for ~0.13 seconds
+        end else if (led_timer > 0) begin
+            led_timer <= led_timer - 1;
+        end
+    end
+
+    // LED logic: 
+    // If the card is enabled AND the timer is active, shimmer at ~120Hz (bit 15)
+    // Otherwise, the LED is completely OFF.
+    assign led = (opl_enabled && led_timer > 0) ? led_shimmer[15] : 1'b0;
 
 endmodule
