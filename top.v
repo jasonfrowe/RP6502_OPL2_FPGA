@@ -141,7 +141,7 @@ module top (
     // The Pattern Logic:
     // 1. Off to start: If !opl_enabled, LED is 0.
     // 2. Pulse when active: If timer > 0, shimmer at ~60Hz (bit 18).
-    // 3. On when enabled: If enabled but no timer, LED is 1 (Solid).
+    // 3. On when enabled: If enabled but no timer, LED is 1 (Solid). ** change slow_cnt[17] to slow_cnt[18] to cut the flicker speed in half. **
     assign led = opl_enabled ? (activity_timer > 0 ? slow_cnt[17] : 1'b1) : 1'b0;
 
 endmodule
