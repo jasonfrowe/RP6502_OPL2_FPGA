@@ -87,17 +87,22 @@ module top (
     reg [8:0] tm = 0; 
     reg [7:0] cr, cv; 
     reg h_wr = 1, h_a0 = 0;
+    
+    // --- NEW: CLOCK DOMAIN SYNCHRONIZER ---
+    // wr_ptr is updated on 8MHz phi2. We sync it to 16MHz clk for the driver.
+    reg [8:0] wr_ptr_sync;
+    always @(posedge clk) wr_ptr_sync <= wr_ptr;
 
     always @(posedge clk) begin
         if (rst || !opl_enabled) begin
             st <= 0; rd_ptr <= 0; h_wr <= 1;
-        end else if (cen_3_58) begin // Only update at OPL2 speed
+        end else if (cen_3_58) begin
             case (st)
-                0: if (rd_ptr != wr_ptr) begin {cr, cv} <= fifo[rd_ptr]; st <= 1; end
+                0: if (rd_ptr != wr_ptr_sync) begin {cr, cv} <= fifo[rd_ptr]; st <= 1; end
                 1: begin h_a0 <= 0; h_wr <= 0; tm <= 12; st <= 2; end
-                2: begin h_wr <= 1; if (tm > 0) tm <= tm - 1; else {tm, st} <= {9'd20, 3'd3}; end // Addr Recovery
+                2: begin h_wr <= 1; if (tm > 0) tm <= tm - 1; else {tm, st} <= {9'd20, 3'd3}; end
                 3: begin h_a0 <= 1; h_wr <= 0; tm <= 12; st <= 4; end
-                4: begin h_wr <= 1; if (tm > 0) tm <= tm - 1; else {tm, st} <= {9'd100, 3'd5}; end // Data Recovery
+                4: begin h_wr <= 1; if (tm > 0) tm <= tm - 1; else {tm, st} <= {9'd100, 3'd5}; end
                 5: if (tm > 0) tm <= tm - 1; else begin rd_ptr <= rd_ptr + 1; st <= 0; end
             endcase
         end
@@ -116,9 +121,27 @@ module top (
 
     sigma_delta_dac dac_inst (.clk(clk), .rst(1'b0), .dac_in(snd), .dac_out(audio_out));
 
-    // LED: Solid if enabled, Pulse if active
-    reg [23:0] ls;
-    always @(posedge clk) ls <= ls + 1;
-    assign led = opl_enabled ? (rd_ptr != wr_ptr ? ls[17] : 1'b1) : ls[21];
+    // ------------------------------------------------------------
+    // 7. NEW: ENHANCED LED PATTERN LOGIC
+    // ------------------------------------------------------------
+    reg [20:0] activity_timer; // Holds the "pulse" for ~130ms
+    reg [23:0] slow_cnt;       // Provides the shimmer frequency
+
+    always @(posedge clk) begin
+        slow_cnt <= slow_cnt + 1;
+        
+        // If the driver is busy draining the FIFO, reset the pulse timer
+        if (rd_ptr != wr_ptr_sync) begin
+            activity_timer <= 21'h1FFFFF; 
+        end else if (activity_timer > 0) begin
+            activity_timer <= activity_timer - 1;
+        end
+    end
+
+    // The Pattern Logic:
+    // 1. Off to start: If !opl_enabled, LED is 0.
+    // 2. Pulse when active: If timer > 0, shimmer at ~60Hz (bit 18).
+    // 3. On when enabled: If enabled but no timer, LED is 1 (Solid).
+    assign led = opl_enabled ? (activity_timer > 0 ? slow_cnt[17] : 1'b1) : 1'b0;
 
 endmodule
